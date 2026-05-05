@@ -1,0 +1,10 @@
+# service to trigger board detection and return results
+# request: trigger detection
+bool trigger
+---
+# response: detected board info
+bool success
+string message
+float32 board_center_x
+float32 board_center_y
+float32 board_center_z
