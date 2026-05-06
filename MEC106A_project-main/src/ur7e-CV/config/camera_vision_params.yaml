@@ -1,0 +1,54 @@
+# RealSense + Operation computer vision parameters.
+# Defaults use the RealSense ROS2 namespace produced by:
+#   ros2 launch realsense2_camera rs_launch.py camera_name:=camera align_depth.enable:=true pointcloud.enable:=true
+
+color_mapper_node:
+  ros__parameters:
+    input_topic: "/camera/camera/color/image_raw"
+    output_topic: "/camera/colormap/image"
+    colormap_id: 2          # 2=JET, 14=INFERNO, 16=VIRIDIS, 11=HOT
+    normalize_input: false
+    publish_rate_hz: 0.0    # 0 = publish every incoming frame
+
+camera_info_node:
+  ros__parameters:
+    camera_info_topic: "/camera/camera/color/camera_info"
+    image_topic: "/camera/camera/color/image_raw"
+    output_topic: "/camera/info_display"
+    publish_interval_sec: 1.0
+    health_timeout_sec: 2.0
+
+board_detector_node:
+  ros__parameters:
+    camera_image_topic: "/camera/camera/color/image_raw"
+    camera_depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
+    camera_info_topic: "/camera/camera/color/camera_info"
+    camera_frame: "camera_color_optical_frame"
+    base_frame: "base_link"
+
+    # Use aligned RealSense depth for 3D. If depth is unavailable, the fallback
+    # assumed_board_depth is used so the detector still publishes debug output.
+    use_depth_for_3d: true
+    assumed_board_depth: 0.50
+    depth_window_px: 9
+    min_depth_m: 0.05
+    max_depth_m: 2.00
+
+    # CV features copied from the non-experiment OpenCV file.
+    config_path: "operation_hsv_config.json"
+    publish_rate_hz: 10.0
+    use_cavity_filter: false
+    track_max_distance_m: 0.06
+    track_max_age_frames: 30
+    target_policy: "highest_confidence"   # highest_confidence | mean | nearest
+
+    # Optional direct overrides. Leave negative to use operation_hsv_config.json.
+    h_low: -1
+    h_high: -1
+    s_low: -1
+    s_high: -1
+    v_low: -1
+    v_high: -1
+    min_area: -1
+    min_circularity: -1.0
+    min_solidity: -1.0

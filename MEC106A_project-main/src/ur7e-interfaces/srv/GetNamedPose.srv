@@ -1,0 +1,8 @@
+# Request
+string pose_name   # e.g. "home", "above_patient", "grasp_ready"
+---
+# Response
+bool success
+string message
+geometry_msgs/PoseStamped pose
+float64[] joint_positions   # radians, 6 joints

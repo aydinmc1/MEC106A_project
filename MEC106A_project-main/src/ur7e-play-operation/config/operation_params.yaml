@@ -1,0 +1,6 @@
+operation_node:
+  ros__parameters:
+    auto_start: false
+    require_camera_health: true
+    velocity_scaling: 0.3
+    acceleration_scaling: 0.2

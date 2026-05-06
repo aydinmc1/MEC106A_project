@@ -1,0 +1,9 @@
+# Request
+string mode        # "auto", "manual", "pause", "abort"
+string reason      # human-readable reason for the mode change
+---
+# Response
+bool success
+string message
+uint8 previous_state
+uint8 new_state

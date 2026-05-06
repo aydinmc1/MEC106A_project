@@ -1,0 +1,15 @@
+# Goal
+string operation_name     # e.g. "full_sequence", "home_only"
+bool dry_run              # simulate without moving
+---
+# Result
+bool success
+string message
+float32 duration_seconds
+uint8 final_state
+---
+# Feedback
+uint8 current_state
+string current_phase
+float32 progress_percent
+string status_message

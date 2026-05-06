@@ -1,0 +1,17 @@
+{
+  "h_low": 20,
+  "h_high": 31,
+  "s_low": 87,
+  "s_high": 255,
+  "v_low": 99,
+  "v_high": 255,
+  "min_area": 37,
+  "min_circularity": 0.5,
+  "min_solidity": 0.7,
+  "silver_s_max": 72,
+  "silver_v_min": 72,
+  "cavity_min_area": 1019,
+  "cavity_max_area": 13636,
+  "cavity_min_circularity": 0.28,
+  "cavity_match_padding_px": 8
+}

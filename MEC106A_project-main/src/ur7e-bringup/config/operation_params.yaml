@@ -1,0 +1,19 @@
+# Global operation parameters shared across all nodes
+# Override per-node in their own config files
+
+ur7e_operation:
+  ros__parameters:
+    # Robot
+    robot_ip: "192.168.1.102"
+    ur_type: "ur7e"
+    use_mock_hardware: false
+
+    # Safety
+    max_velocity_scaling: 0.3        # 30% of max during operation
+    max_acceleration_scaling: 0.2
+    emergency_stop_on_camera_loss: true
+    camera_timeout_seconds: 2.0
+
+    # Operation
+    operation_name: "play_operation"
+    auto_start: false

@@ -1,0 +1,34 @@
+Visualization Manager:
+  Class: ""
+  Fixed Frame: base_link
+  Name: root
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Axes: true
+      Frame Timeout: 0.0
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Robot Description: /robot_description
+    - Class: rviz_default_plugins/Image
+      Name: CameraImage
+      Enabled: true
+      Topic: /camera/color/image_raw
+      Transport Hint: raw
+      Queue Size: 10
+    - Class: rviz_default_plugins/Point
+      Name: BoardCenter
+      Enabled: true
+      Topic: /board_center
+      Color: {r: 0.0, g: 1.0, b: 0.0}
+      Radius: 0.01
+      Alpha: 1.0
+    - Class: rviz_default_plugins/Pose
+      Name: DetectedBoardPose
+      Enabled: true
+      Topic: /detected_board_pose
+      Arrow Size: 0.15
+      Shaft Radius: 0.01
+      Head Radius: 0.02

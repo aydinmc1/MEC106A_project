@@ -1,0 +1,51 @@
+# Named poses for the UR7e play operation.
+# joint values are in radians: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]
+#
+# To capture a new pose:
+#   1. Teach the robot the position manually or via RViz
+#   2. Run: ros2 topic echo /joint_states --once
+#   3. Copy the position array here
+
+named_poses:
+
+  home:
+    description: "Safe upright home position"
+    joints: [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0]
+    position:
+      x: 0.0
+      y: 0.0
+      z: 0.8
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      w: 1.0
+
+  above_patient:
+    description: "Position above the operation field, camera looking down"
+    joints: [0.0, -1.2217, 1.0472, -1.3963, -1.5708, 0.0]
+    position:
+      x: 0.45
+      y: 0.0
+      z: 0.55
+    orientation:
+      x: 0.0
+      y: 0.7071
+      z: 0.0
+      w: 0.7071
+
+  grasp_ready:
+    description: "Pre-grasp approach position"
+    joints: [0.1745, -1.3963, 1.2217, -1.4835, -1.5708, 0.1745]
+    position:
+      x: 0.42
+      y: 0.05
+      z: 0.35
+
+  retract:
+    description: "Safe retraction after operation"
+    joints: [0.0, -1.9199, 0.5236, -0.6981, -1.5708, 0.0]
+    position:
+      x: 0.2
+      y: 0.0
+      z: 0.7

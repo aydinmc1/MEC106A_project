@@ -1,0 +1,13 @@
+# Goal
+string pose_name
+float64 velocity_scaling    # 0.0 - 1.0
+float64 acceleration_scaling
+---
+# Result
+bool success
+string message
+float32 execution_time_seconds
+---
+# Feedback
+float32 progress_percent
+geometry_msgs/PoseStamped current_pose
