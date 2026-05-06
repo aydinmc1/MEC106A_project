@@ -1,244 +1,246 @@
 """
-board_detector_node: subscribes to camera feed, captures snapshots, runs placeholder detection.
-publishes detected board info and exposes a DetectBoard service.
+board_detector_node: ROS2 wrapper around PieceDetector.
+
+All CV logic lives in piece_detector.py (zero ROS2 imports there).
+This node only handles ROS2 plumbing: subscriptions, publishers, service.
+
+Subscriptions:
+  /camera/color/image_raw                  sensor_msgs/Image (BGR8)
+  /camera/aligned_depth_to_color/image_raw sensor_msgs/Image (uint16 depth)
+  /camera/color/camera_info                sensor_msgs/CameraInfo
+
+Publishers:
+  /piece_detections       std_msgs/String   — JSON array of all detections
+  /detection_debug_image  sensor_msgs/Image — annotated colour frame
+  board_center            geometry_msgs/PointStamped  (highest-confidence piece)
+  detected_board_pose     geometry_msgs/PoseStamped   (same point as a pose)
+
+Services:
+  detect_board  ur_board_detection/DetectBoard
+               Runs detection on demand; returns the highest-confidence piece.
+               The response fields board_center_{x,y,z} hold the 3-D grasp
+               point in the camera frame (meters).  piece_name and grasp
+               metadata are embedded in the message string.
 """
+
+import json
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-import cv2
 import numpy as np
 from cv_bridge import CvBridge
 
-from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped, PoseStamped
-from ur_board_detection.srv import DetectBoard
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
 
+from ur_board_detection.srv import DetectBoard
 from ur_board_detection.tf_pose_utils import (
-    pixel_to_camera_3d,
+    identity_quaternion,
     make_point_stamped,
     make_pose_stamped,
-    identity_quaternion,
 )
+from ur_board_detection.piece_detector import PieceDetection, PieceDetector
 
 
 class BoardDetectorNode(Node):
     def __init__(self):
         super().__init__("board_detector_node")
-        
-        # parameters
-        self.declare_parameter("camera_image_topic", "/camera/color/image_raw")
-        self.declare_parameter("camera_info_topic", "/camera/color/camera_info")
-        self.declare_parameter("camera_frame", "camera_color_optical_frame")
-        self.declare_parameter("assumed_board_depth", 0.5)  # meters, distance to board from camera
-        
-        self.camera_image_topic = self.get_parameter("camera_image_topic").value
-        self.camera_info_topic = self.get_parameter("camera_info_topic").value
+
+        # --- Parameters ---
+        self.declare_parameter("camera_image_topic",
+                               "/camera/color/image_raw")
+        self.declare_parameter("camera_depth_topic",
+                               "/camera/aligned_depth_to_color/image_raw")
+        self.declare_parameter("camera_info_topic",
+                               "/camera/color/camera_info")
+        self.declare_parameter("camera_frame",
+                               "camera_color_optical_frame")
+        self.declare_parameter("assumed_board_depth", 0.5)
+        self.declare_parameter("config_path",         "operation_hsv_config.json")
+        self.declare_parameter("publish_rate_hz",     10.0)
+
+        color_topic   = self.get_parameter("camera_image_topic").value
+        depth_topic   = self.get_parameter("camera_depth_topic").value
+        info_topic    = self.get_parameter("camera_info_topic").value
         self.camera_frame = self.get_parameter("camera_frame").value
-        self.assumed_board_depth = self.get_parameter("assumed_board_depth").value
-        
-        # state
-        self.latest_image = None
-        self.latest_camera_info = None
+        config_path   = self.get_parameter("config_path").value
+
+        # --- State ---
+        self.latest_bgr:       np.ndarray | None = None
+        self.latest_depth:     np.ndarray | None = None  # uint16 aligned depth
+        self.latest_image_msg: Image | None      = None
+        self.last_detections:  list[PieceDetection] = []
         self.cv_bridge = CvBridge()
-        
-        # qos for image subscriptions (best effort, smaller history)
+
+        # --- Detector (pure CV, no ROS2) ---
+        self.detector = PieceDetector(config_path=config_path)
+
+        # --- QoS: best-effort / depth-1 for image streams ---
         img_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=1,
         )
-        
-        # subscriptions
-        self.image_sub = self.create_subscription(
-            Image,
-            self.camera_image_topic,
-            self.on_image,
-            qos_profile=img_qos
+
+        # --- Subscriptions ---
+        self.create_subscription(Image, color_topic,
+                                 self._on_color_image, qos_profile=img_qos)
+        self.create_subscription(Image, depth_topic,
+                                 self._on_depth_image, qos_profile=img_qos)
+        self.create_subscription(CameraInfo, info_topic,
+                                 self._on_camera_info, qos_profile=10)
+
+        # --- Publishers ---
+        self.piece_det_pub    = self.create_publisher(String,       "/piece_detections",      10)
+        self.debug_image_pub  = self.create_publisher(Image,        "/detection_debug_image", 10)
+        self.board_center_pub = self.create_publisher(PointStamped, "board_center",           10)
+        self.board_pose_pub   = self.create_publisher(PoseStamped,  "detected_board_pose",    10)
+
+        # --- Service ---
+        self.create_service(DetectBoard, "detect_board",
+                            self._handle_detect_board_service)
+
+        # --- Timer ---
+        period = 1.0 / float(self.get_parameter("publish_rate_hz").value)
+        self.create_timer(period, self._process_latest_frame)
+
+        self.get_logger().info(
+            f"board_detector_node ready  "
+            f"color={color_topic}  depth={depth_topic}"
         )
-        
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo,
-            self.camera_info_topic,
-            self.on_camera_info,
-            qos_profile=10
-        )
-        
-        # service
-        self.detect_service = self.create_service(
-            DetectBoard,
-            "detect_board",
-            self.handle_detect_board_service
-        )
-        
-        # publishers (for debugging/visualization)
-        self.board_center_pub = self.create_publisher(PointStamped, "board_center", 10)
-        self.detected_board_pose_pub = self.create_publisher(PoseStamped, "detected_board_pose", 10)
-        
-        self.get_logger().info(f"board_detector_node started. camera image: {self.camera_image_topic}")
-    
-    def on_image(self, msg):
-        """callback for camera image subscription."""
-        self.latest_image = msg
-    
-    def on_camera_info(self, msg):
-        """callback for camera info subscription."""
-        self.latest_camera_info = msg
-    
-    def detect_board_placeholder(self, cv_image):
+
+    # ------------------------------------------------------------------
+    # Subscription callbacks
+    # ------------------------------------------------------------------
+
+    def _on_color_image(self, msg: Image) -> None:
+        self.latest_image_msg = msg
+        try:
+            self.latest_bgr = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as exc:
+            self.get_logger().error(f"colour image conversion failed: {exc}")
+
+    def _on_depth_image(self, msg: Image) -> None:
+        try:
+            # 'passthrough' preserves the uint16 pixel values exactly
+            self.latest_depth = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        except Exception as exc:
+            self.get_logger().error(f"depth image conversion failed: {exc}")
+
+    def _on_camera_info(self, msg: CameraInfo) -> None:
+        K = msg.k
+        self.detector.update_intrinsics(fx=K[0], fy=K[4], cx=K[2], cy=K[5])
+
+    # ------------------------------------------------------------------
+    # Timer: run detection every tick and publish results
+    # ------------------------------------------------------------------
+
+    def _process_latest_frame(self) -> None:
+        if self.latest_bgr is None:
+            return
+
+        bgr   = self.latest_bgr
+        depth = self.latest_depth  # None until the depth topic is received
+
+        detections = self.detector.process_frame(bgr, depth)
+        self.last_detections = detections
+
+        # 1. Publish JSON detection array for downstream nodes
+        self._publish_detection_json(detections)
+
+        # 2. Publish annotated debug image
+        # last_cavities / last_stubs are cached by process_frame()
+        self._publish_debug_image(bgr, detections)
+
+        # 3. Publish board-centre markers for the highest-confidence piece
+        if detections:
+            best = max(detections, key=lambda d: d.confidence)
+            self._publish_board_markers(best)
+
+    def _publish_detection_json(self, detections: list[PieceDetection]) -> None:
+        payload = []
+        for det in detections:
+            x3, y3, z3 = det.grasp_point_3d
+            payload.append({
+                "piece_name":         det.piece_name,
+                "grasp_px":           list(det.grasp_point_2d),
+                "grasp_3d_m":         [round(x3, 4), round(y3, 4), round(z3, 4)],
+                "grasp_depth_offset": det.grasp_depth_offset,
+                "approach_axis":      det.approach_axis,
+                "confidence":         round(det.confidence, 3),
+            })
+        self.piece_det_pub.publish(String(data=json.dumps(payload)))
+
+    def _publish_debug_image(self, bgr, detections: list[PieceDetection]) -> None:
+        # draw_debug() uses self.detector.last_cavities / last_stubs automatically
+        debug_img = self.detector.draw_debug(bgr, detections)
+        try:
+            debug_msg = self.cv_bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
+            if self.latest_image_msg is not None:
+                debug_msg.header = self.latest_image_msg.header
+            self.debug_image_pub.publish(debug_msg)
+        except Exception as exc:
+            self.get_logger().error(f"debug image publish failed: {exc}")
+
+    def _publish_board_markers(self, det: PieceDetection) -> None:
+        x3, y3, z3 = det.grasp_point_3d
+        pt = make_point_stamped(x3, y3, z3, self.camera_frame)
+        self.board_center_pub.publish(pt)
+        pose = make_pose_stamped(x3, y3, z3, self.camera_frame,
+                                 orientation_quat=identity_quaternion())
+        self.board_pose_pub.publish(pose)
+
+    # ------------------------------------------------------------------
+    # DetectBoard service
+    # ------------------------------------------------------------------
+
+    def _handle_detect_board_service(self, request, response):
         """
-        placeholder board detection function.
-        
-        in a real scenario, this would run a trained detector (YOLO, etc.) to find board
-        edges and features. for now, we mock it:
-        - find bright yellow regions (mimics the operation board)
-        - estimate board center and rough size
-        
-        args:
-            cv_image: opencv image (bgr)
-        
-        returns:
-            dict with keys:
-                'success': bool
-                'board_center_px': (x, y) tuple in pixels
-                'board_corners_px': list of (x, y) tuples for board corners
-                'board_size_px': (width, height) estimate
-                'message': string description
+        Run detection on the latest frame and return the highest-confidence
+        piece's 3-D grasp point.  Piece name and grasp metadata are included
+        in the response message string.
         """
-        # TODO: replace this with real detector when ready.
-        
-        # convert to hsv for color-based detection
-        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-        
-        # mock board detection: look for bright yellow regions
-        # yellow hue range in opencv: ~15-35 (out of 0-180)
-        lower_yellow = np.array([15, 100, 100])
-        upper_yellow = np.array([35, 255, 255])
-        mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-        
-        # morphological cleanup
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        
-        # find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if len(contours) == 0:
-            return {
-                'success': False,
-                'board_center_px': None,
-                'board_corners_px': [],
-                'board_size_px': None,
-                'message': 'no yellow board detected'
-            }
-        
-        # find largest contour (assume it's the board)
-        largest_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest_contour)
-        
-        if area < 1000:  # filter out small noise
-            return {
-                'success': False,
-                'board_center_px': None,
-                'board_corners_px': [],
-                'board_size_px': None,
-                'message': f'largest contour too small: {area} px^2'
-            }
-        
-        # get bounding rect and centroid
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        M = cv2.moments(largest_contour)
-        if M['m00'] > 0:
-            cx = int(M['m10'] / M['m00'])
-            cy = int(M['m01'] / M['m00'])
-        else:
-            cx = x + w // 2
-            cy = y + h // 2
-        
-        # approximate board corners (bounding box corners for now)
-        board_corners = [
-            (x, y),
-            (x + w, y),
-            (x + w, y + h),
-            (x, y + h)
-        ]
-        
-        return {
-            'success': True,
-            'board_center_px': (cx, cy),
-            'board_corners_px': board_corners,
-            'board_size_px': (w, h),
-            'message': f'detected board at ({cx}, {cy}), area={area:.0f} px^2'
-        }
-    
-    def handle_detect_board_service(self, request, response):
-        """
-        service handler for DetectBoard service.
-        captures latest image, runs detection, and returns results.
-        """
-        if self.latest_image is None:
+        if not request.trigger:
+            response.success = False
+            response.message = "trigger flag not set"
+            return response
+
+        if self.latest_bgr is None:
             response.success = False
             response.message = "no image received yet"
-            self.get_logger().warn("detect_board service called but no image available")
+            self.get_logger().warn("detect_board called but no image available")
             return response
-        
-        if self.latest_camera_info is None:
+
+        # Fresh detection on the current frame
+        detections = self.detector.process_frame(self.latest_bgr, self.latest_depth)
+        self.last_detections = detections
+
+        if not detections:
             response.success = False
-            response.message = "no camera info received yet"
-            self.get_logger().warn("detect_board service called but no camera info available")
+            response.message = "no pieces detected"
             return response
-        
-        # convert ros image to opencv
-        try:
-            cv_image = self.cv_bridge.imgmsg_to_cv2(self.latest_image, desired_encoding="bgr8")
-        except Exception as e:
-            response.success = False
-            response.message = f"failed to convert image: {str(e)}"
-            return response
-        
-        # run detection
-        detection_result = self.detect_board_placeholder(cv_image)
-        
-        if not detection_result['success']:
-            response.success = False
-            response.message = detection_result['message']
-            return response
-        
-        # convert pixel coords to 3d camera coords
-        board_center_px = detection_result['board_center_px']
-        x_cam, y_cam, z_cam = pixel_to_camera_3d(
-            board_center_px[0],
-            board_center_px[1],
-            self.assumed_board_depth,
-            self.latest_camera_info
-        )
-        
-        # populate response
+
+        best = max(detections, key=lambda d: d.confidence)
+        x3, y3, z3 = best.grasp_point_3d
+
         response.success = True
-        response.message = detection_result['message']
-        response.board_center_x = x_cam
-        response.board_center_y = y_cam
-        response.board_center_z = z_cam
-        
-        # also publish for visualization/debugging
-        board_center_point = make_point_stamped(
-            x_cam, y_cam, z_cam,
-            self.camera_frame,
-            timestamp=self.latest_image.header.stamp
+        response.message = (
+            f"piece={best.piece_name} "
+            f"conf={best.confidence:.2f} "
+            f"ax={best.approach_axis} "
+            f"dz={best.grasp_depth_offset:.3f}m"
         )
-        self.board_center_pub.publish(board_center_point)
-        
-        board_pose = make_pose_stamped(
-            x_cam, y_cam, z_cam,
-            self.camera_frame,
-            orientation_quat=identity_quaternion()
+        response.board_center_x = float(x3)
+        response.board_center_y = float(y3)
+        response.board_center_z = float(z3)
+
+        self.get_logger().info(
+            f"detect_board → {best.piece_name} at "
+            f"({x3:.3f},{y3:.3f},{z3:.3f})m  conf={best.confidence:.2f}"
         )
-        self.detected_board_pose_pub.publish(board_pose)
-        
-        self.get_logger().info(f"board detected at camera frame: ({x_cam:.3f}, {y_cam:.3f}, {z_cam:.3f})")
-        
         return response
 
 
